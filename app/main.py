@@ -64,6 +64,15 @@ def main() -> None:
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
 
+    # Inisialisasi Database
+    import asyncio
+    from app.storage.database import DatabaseManager
+    from app.storage.watchlist_repository import WatchlistRepository
+
+    db_manager = DatabaseManager(database_url=settings.database_url)
+    asyncio.run(db_manager.init_db())
+    watchlist_repo = WatchlistRepository(session_factory=db_manager.session_factory)
+
     # Setup provider dan service
     provider = YFinanceProvider(timeout_seconds=settings.request_timeout_seconds)
     market_service = MarketDataService(
@@ -75,6 +84,8 @@ def main() -> None:
     handlers = BotCommandHandlers(
         market_service=market_service,
         allowed_ids=allowed_ids,
+        watchlist_repo=watchlist_repo,
+        max_watchlist_assets=settings.max_watchlist_assets,
     )
 
     # Build Telegram application
@@ -89,6 +100,10 @@ def main() -> None:
     app.add_handler(CommandHandler("help", handlers.cmd_help))
     app.add_handler(CommandHandler("stock", handlers.cmd_stock))
     app.add_handler(CommandHandler("gold", handlers.cmd_gold))
+    app.add_handler(CommandHandler("watchlist", handlers.cmd_watchlist))
+    app.add_handler(CommandHandler("market", handlers.cmd_market))
+    app.add_handler(CommandHandler("add", handlers.cmd_add))
+    app.add_handler(CommandHandler("remove", handlers.cmd_remove))
 
     logger.info(
         "Bot siap. Provider: %s. Timezone: %s",

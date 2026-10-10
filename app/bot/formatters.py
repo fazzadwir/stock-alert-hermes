@@ -216,13 +216,18 @@ def format_help_message() -> str:
         "• /start — Perkenalan bot\n"
         "• /help — Tampilkan panduan ini\n"
         "• /stock &lt;ticker&gt; — Cek harga saham\n"
-        "• /gold — Cek harga emas futures COMEX\n\n"
+        "• /gold — Cek harga emas futures COMEX\n"
+        "• /watchlist — Lihat seluruh aset di watchlist Anda\n"
+        "• /market — Snapshot pergerakan harga watchlist\n"
+        "• /add &lt;ticker&gt; [catatan] — Tambah aset ke watchlist\n"
+        "• /remove &lt;ticker&gt; — Hapus aset dari watchlist\n\n"
         "<b>Contoh penggunaan:</b>\n"
         "<code>/stock AAPL</code> — Apple Inc.\n"
         "<code>/stock BBCA.JK</code> — Bank BCA (IDX)\n"
-        "<code>/stock TLKM.JK</code> — Telkom Indonesia\n"
-        "<code>/stock GOOGL</code> — Alphabet (Google)\n"
-        "<code>/gold</code> — Emas futures COMEX (GC=F)\n\n"
+        "<code>/gold</code> — Emas futures COMEX (GC=F)\n"
+        "<code>/add BBCA.JK Core banking</code> — Tambah ke watchlist\n"
+        "<code>/add GC=F Lindung nilai</code> — Tambah emas ke watchlist\n"
+        "<code>/remove BBCA.JK</code> — Hapus dari watchlist\n\n"
         "<b>Format ticker saham Indonesia (IDX):</b>\n"
         "Tambahkan <code>.JK</code> di akhir kode saham.\n"
         "Contoh: <code>BBCA.JK</code>, <code>BMRI.JK</code>, <code>ASII.JK</code>\n\n"
@@ -230,7 +235,7 @@ def format_help_message() -> str:
         "• Data IDX umumnya delayed 15-20 menit\n"
         "• <code>GC=F</code> adalah emas futures COMEX, bukan harga spot/Antam\n"
         "• Provider: yfinance (bukan API resmi Yahoo Finance)\n\n"
-        "<i>Fitur watchlist, alert, dan analisis AI sedang dalam pengembangan.</i>"
+        "<i>Fitur alert dan analisis AI sedang dalam pengembangan.</i>"
     )
 
 
@@ -242,3 +247,132 @@ def format_access_denied() -> str:
 def format_token_not_configured() -> str:
     """Format pesan token belum dikonfigurasi."""
     return "⚙️ Bot belum dikonfigurasi. Hubungi administrator."
+
+
+# ─── Watchlist & Market Formatters ───────────────────────────────────────────
+
+
+def format_watchlist_empty() -> str:
+    """Format pesan ketika watchlist masih kosong."""
+    return (
+        "📋 <b>Watchlist Anda Masih Kosong</b>\n\n"
+        "Belum ada aset yang dipantau. Gunakan perintah <code>/add</code> untuk menambahkan aset.\n\n"
+        "<b>Contoh:</b>\n"
+        "• <code>/add BBCA.JK Saham Banking</code>\n"
+        "• <code>/add AAPL Apple Inc</code>\n"
+        "• <code>/add GC=F Emas COMEX</code>"
+    )
+
+
+def format_watchlist(items_with_quotes: list[tuple[Any, QuoteResult]]) -> str:
+    """
+    Format daftar watchlist lengkap dengan harga saat ini dan perubahan.
+    items_with_quotes: list of (WatchlistItem, QuoteResult)
+    """
+    if not items_with_quotes:
+        return format_watchlist_empty()
+
+    lines = [f"📋 <b>Watchlist Anda ({len(items_with_quotes)} aset)</b>\n"]
+
+    for item, quote in items_with_quotes:
+        symbol = html.escape(item.symbol)
+        note_str = f" <i>({html.escape(item.note)})</i>" if getattr(item, "note", None) else ""
+
+        if quote.is_failed or not quote.has_price:
+            lines.append(f"• <b>{symbol}</b>{note_str}: <i>(Gagal memuat harga)</i>")
+            continue
+
+        price_str = _format_price(quote.price, quote.currency)
+
+        # Perubahan harga
+        if quote.has_change:
+            arrow = "🟢 +" if quote.price_change > 0 else ("🔴 " if quote.price_change < 0 else "⚪ ")
+            change_str = f" {arrow}{quote.price_change_pct:+.2f}%"
+        else:
+            change_str = ""
+
+        lines.append(f"• <b>{symbol}</b>{note_str}: <code>{price_str}</code>{change_str}")
+
+    lines.append("\n<i>Gunakan /market untuk snapshot lengkap atau /stock &lt;ticker&gt; untuk detail.</i>")
+    return "\n".join(lines)
+
+
+def format_market_summary(quotes: list[QuoteResult]) -> str:
+    """Format ringkasan pasar untuk aset-aset dalam watchlist."""
+    if not quotes:
+        return format_watchlist_empty()
+
+    lines = [
+        "📊 <b>Snapshot Pasar Watchlist</b>\n",
+    ]
+
+    gainers = 0
+    losers = 0
+    unchanged = 0
+
+    for q in quotes:
+        symbol = html.escape(q.symbol)
+        if q.is_failed or not q.has_price:
+            lines.append(f"• <b>{symbol}</b>: <i>Data tidak tersedia</i>")
+            continue
+
+        price_str = _format_price(q.price, q.currency)
+
+        if q.has_change:
+            if q.price_change > 0:
+                gainers += 1
+                icon = "🟢"
+            elif q.price_change < 0:
+                losers += 1
+                icon = "🔴"
+            else:
+                unchanged += 1
+                icon = "⚪"
+            change_str = f"{icon} {q.price_change_pct:+.2f}%"
+        else:
+            unchanged += 1
+            change_str = "⚪ –"
+
+        lines.append(f"• <b>{symbol}</b>: <code>{price_str}</code> ({change_str})")
+
+    lines.append(f"\n<b>Ringkasan:</b> 🟢 {gainers} Naik | 🔴 {losers} Turun | ⚪ {unchanged} Flat")
+    lines.append("<i>⚠️ Data IDX delayed 15-20 min. Emas adalah COMEX futures (GC=F).</i>")
+    return "\n".join(lines)
+
+
+def format_add_success(symbol: str, quote: QuoteResult, note: Optional[str] = None) -> str:
+    """Format pesan sukses menambah item ke watchlist."""
+    sym_escaped = html.escape(symbol.upper())
+    note_escaped = f"\nCatatan: <i>{html.escape(note)}</i>" if note else ""
+    price_info = ""
+    if quote.has_price:
+        price_info = f"\nHarga saat ini: <code>{_format_price(quote.price, quote.currency)}</code>"
+
+    return (
+        f"✅ <b>{sym_escaped}</b> berhasil ditambahkan ke watchlist!{note_escaped}{price_info}\n\n"
+        f"Ketik <code>/watchlist</code> untuk melihat daftar pantauan."
+    )
+
+
+def format_add_exists(symbol: str) -> str:
+    """Format pesan ketika item sudah ada di watchlist."""
+    return f"ℹ️ Simbol <b>{html.escape(symbol.upper())}</b> sudah ada di watchlist Anda."
+
+
+def format_add_limit_reached(max_limit: int) -> str:
+    """Format pesan ketika watchlist sudah mencapai batas limit."""
+    return (
+        f"⚠️ Watchlist Anda telah mencapai batas maksimal ({max_limit} aset).\n"
+        f"Hapus aset yang tidak dibutuhkan dengan <code>/remove &lt;ticker&gt;</code>."
+    )
+
+
+def format_remove_success(symbol: str) -> str:
+    """Format pesan sukses menghapus item dari watchlist."""
+    return f"🗑️ <b>{html.escape(symbol.upper())}</b> berhasil dihapus dari watchlist Anda."
+
+
+def format_remove_not_found(symbol: str) -> str:
+    """Format pesan ketika simbol tidak ditemukan di watchlist saat remove."""
+    return f"❓ Simbol <b>{html.escape(symbol.upper())}</b> tidak ditemukan dalam watchlist Anda."
+
