@@ -485,3 +485,77 @@ def format_alert_limit_reached(max_limit: int) -> str:
     )
 
 
+# ─── Technical Analysis Formatter ───────────────────────────────────────────
+
+
+def format_technical_analysis(ta: Any) -> str:
+    """Format hasil analisis teknikal (RSI, Moving Averages, Tren, S/R)."""
+    if getattr(ta, "is_failed", False):
+        err = html.escape(getattr(ta, "error_message", None) or "Gagal memproses analisis teknikal.")
+        return f"⚠️ <b>Analisis Teknikal Gagal ({html.escape(ta.symbol)})</b>\n\n{err}"
+
+    symbol = html.escape(ta.symbol)
+    price_str = _format_price(ta.current_price, ta.currency)
+
+    # Format RSI
+    if ta.rsi_14 is not None:
+        if ta.rsi_status == "overbought":
+            rsi_badge = "🔴 Overbought (≥70)"
+        elif ta.rsi_status == "oversold":
+            rsi_badge = "🟢 Oversold (≤30)"
+        else:
+            rsi_badge = "⚪ Netral (30-70)"
+        rsi_line = f"• RSI (14): <code>{ta.rsi_14:.2f}</code> ({rsi_badge})"
+    else:
+        rsi_line = "• RSI (14): <i>Data tidak mencukupi</i>"
+
+    # Format Moving Averages
+    ma_lines = []
+    if ta.sma_20 is not None:
+        pos_20 = "Harga di atas MA20" if ta.price_vs_sma20 == "above" else "Harga di bawah MA20"
+        ma_lines.append(f"• MA20: <code>{_format_price(ta.sma_20, ta.currency)}</code> ({pos_20})")
+    if ta.sma_50 is not None:
+        ma_lines.append(f"• MA50: <code>{_format_price(ta.sma_50, ta.currency)}</code>")
+
+    # Format Tren & Persilangan
+    trend_labels = {
+        "strong_bullish": "🟢🟢 Sangat Bullish (Harga > MA20 ≥ MA50)",
+        "bullish": "🟢 Bullish (Harga > MA20)",
+        "strong_bearish": "🔴🔴 Sangat Bearish (Harga < MA20 ≤ MA50)",
+        "bearish": "🔴 Bearish (Harga < MA20)",
+        "neutral": "⚪ Netral / Konsolidasi",
+    }
+    trend_str = trend_labels.get(ta.ma_trend or "neutral", "⚪ Netral")
+
+    crossover_line = ""
+    if ta.ma_crossover == "golden_cross":
+        crossover_line = "\n• Sinyal MA: ✨ <b>Golden Cross Terdeteksi!</b> (MA20 memotong ke atas MA50)"
+    elif ta.ma_crossover == "death_cross":
+        crossover_line = "\n• Sinyal MA: ⚠️ <b>Death Cross Terdeteksi!</b> (MA20 memotong ke bawah MA50)"
+
+    # Format Support & Resistance
+    sr_lines = []
+    if ta.resistance_20d is not None:
+        sr_lines.append(f"• Resistance (20H): <code>{_format_price(ta.resistance_20d, ta.currency)}</code>")
+    if ta.support_20d is not None:
+        sr_lines.append(f"• Support (20H): <code>{_format_price(ta.support_20d, ta.currency)}</code>")
+
+    sr_section = ("\n\n🎯 <b>Level Kunci (20 Hari):</b>\n" + "\n".join(sr_lines)) if sr_lines else ""
+
+    ma_section = ("\n" + "\n".join(ma_lines)) if ma_lines else ""
+
+    return (
+        f"📊 <b>Analisis Teknikal: {symbol}</b>\n"
+        f"Harga Terkini: <b>{price_str}</b>\n"
+        f"Sampel Data: <i>{ta.data_points} hari bursa</i>\n\n"
+        f"📈 <b>Indikator Momentum & Tren:</b>\n"
+        f"{rsi_line}"
+        f"{ma_section}\n"
+        f"• Tren: {trend_str}"
+        f"{crossover_line}"
+        f"{sr_section}\n\n"
+        f"<i>⚠️ Indikator dihitung murni berbasis rumus matematika historis. Bukan ajakan jual/beli.</i>"
+    )
+
+
+

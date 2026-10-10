@@ -86,6 +86,10 @@ def main() -> None:
         cache_ttl_seconds=settings.quote_cache_seconds,
     )
 
+    # Inisialisasi Technical Analysis Service
+    from app.indicators.service import TechnicalAnalysisService
+    ta_service = TechnicalAnalysisService(market_service=market_service)
+
     # Setup command handlers
     handlers = BotCommandHandlers(
         market_service=market_service,
@@ -94,6 +98,7 @@ def main() -> None:
         max_watchlist_assets=settings.max_watchlist_assets,
         alert_repo=alert_repo,
         max_active_alerts=settings.max_active_alerts,
+        ta_service=ta_service,
     )
 
     # Build Telegram application
@@ -142,6 +147,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alert", handlers.cmd_alert))
     app.add_handler(CommandHandler("alerts", handlers.cmd_alerts))
     app.add_handler(CommandHandler("delalert", handlers.cmd_delalert))
+    app.add_handler(CommandHandler("ta", handlers.cmd_ta))
 
     logger.info(
         "Bot siap. Provider: %s. Timezone: %s",

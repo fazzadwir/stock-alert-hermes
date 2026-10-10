@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from app.domain.market_schemas import DataStatus, InstrumentType, QuoteResult
+from app.domain.market_schemas import DataStatus, HistoricalCandles, InstrumentType, QuoteResult
 
 logger = logging.getLogger(__name__)
 
@@ -278,34 +278,98 @@ class YFinanceProvider:
     async def get_history(
         self,
         symbol: str,
-        period: str = "1mo",
+        period: str = "6mo",
         interval: str = "1d",
-    ) -> Any:
+    ) -> Optional[HistoricalCandles]:
         """
-        Ambil data historis. Digunakan oleh Phase 4 (Indicators).
-        Saat ini mengembalikan raw yfinance DataFrame.
+        Ambil data candle historis untuk indikator teknikal (Phase 4).
+        Returns HistoricalCandles atau None jika gagal.
         """
+        symbol_upper = symbol.upper().strip()
         try:
             result = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
-                    None, self._fetch_history_sync, symbol.upper(), period, interval
+                    None, self._fetch_history_sync, symbol_upper, period, interval
                 ),
                 timeout=self._timeout,
             )
             return result
         except asyncio.TimeoutError:
-            logger.warning("yfinance history timeout untuk %s", symbol)
+            logger.warning("yfinance history timeout untuk %s", symbol_upper)
             return None
         except Exception as exc:
-            logger.error("yfinance history error untuk %s: %s", symbol, type(exc).__name__)
+            logger.error("yfinance history error untuk %s: %s", symbol_upper, type(exc).__name__)
             return None
 
-    def _fetch_history_sync(self, symbol: str, period: str, interval: str) -> Any:
-        """Blocking: ambil historis dari yfinance."""
+    def _fetch_history_sync(self, symbol: str, period: str, interval: str) -> Optional[HistoricalCandles]:
+        """Blocking: ambil candle historis dari Yahoo Finance chart endpoint atau yfinance."""
+        # 1. Coba direct Yahoo Finance chart API
+        try:
+            import requests  # noqa: PLC0415
+
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                )
+            }
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={period}&interval={interval}"
+            resp = requests.get(url, headers=headers, timeout=self._timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("chart", {}).get("result")
+                if results and len(results) > 0:
+                    res = results[0]
+                    timestamps_raw = res.get("timestamp", [])
+                    quote_data = res.get("indicators", {}).get("quote", [{}])[0]
+                    closes_raw = quote_data.get("close", [])
+                    highs_raw = quote_data.get("high", [])
+                    lows_raw = quote_data.get("low", [])
+
+                    closes: list[Decimal] = []
+                    highs: list[Decimal] = []
+                    lows: list[Decimal] = []
+                    timestamps: list[datetime] = []
+
+                    for i, c in enumerate(closes_raw):
+                        if c is not None:
+                            closes.append(Decimal(str(round(c, 4))))
+                            h = highs_raw[i] if i < len(highs_raw) and highs_raw[i] is not None else c
+                            l = lows_raw[i] if i < len(lows_raw) and lows_raw[i] is not None else c
+                            highs.append(Decimal(str(round(h, 4))))
+                            lows.append(Decimal(str(round(l, 4))))
+                            if i < len(timestamps_raw):
+                                timestamps.append(datetime.fromtimestamp(timestamps_raw[i], tz=timezone.utc))
+
+                    if closes:
+                        return HistoricalCandles(
+                            symbol=symbol,
+                            closes=closes,
+                            highs=highs,
+                            lows=lows,
+                            timestamps=timestamps,
+                        )
+        except Exception as exc:
+            logger.debug("Direct Yahoo chart history gagal untuk %s: %s", symbol, exc)
+
+        # 2. Fallback yfinance ticker history
         try:
             import yfinance as yf  # noqa: PLC0415
+
             ticker = yf.Ticker(symbol)
-            return ticker.history(period=period, interval=interval)
+            df = ticker.history(period=period, interval=interval)
+            if df is not None and not df.empty:
+                closes = [Decimal(str(round(x, 4))) for x in df["Close"].dropna()]
+                highs = [Decimal(str(round(x, 4))) for x in df["High"].dropna()]
+                lows = [Decimal(str(round(x, 4))) for x in df["Low"].dropna()]
+                return HistoricalCandles(
+                    symbol=symbol,
+                    closes=closes,
+                    highs=highs,
+                    lows=lows,
+                )
         except Exception as exc:
-            logger.error("_fetch_history_sync error untuk %s: %s", symbol, type(exc).__name__)
-            return None
+            logger.error("_fetch_history_sync error untuk %s: %s", symbol, exc)
+
+        return None

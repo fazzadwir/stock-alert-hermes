@@ -101,3 +101,47 @@ class QuoteResult(BaseModel):
 
     class Config:
         use_enum_values = False
+
+
+class HistoricalCandles(BaseModel):
+    """Kumpulan data candle historis untuk kalkulasi indikator teknikal."""
+    symbol: str
+    closes: list[Decimal] = []
+    highs: list[Decimal] = []
+    lows: list[Decimal] = []
+    timestamps: list[datetime] = []
+
+    @property
+    def count(self) -> int:
+        return len(self.closes)
+
+
+class TechnicalAnalysisResult(BaseModel):
+    """Hasil analisis teknikal (RSI, MA, Tren, S/R)."""
+    symbol: str
+    current_price: Optional[Decimal] = None
+    currency: Optional[str] = None
+    data_points: int = 0
+
+    # RSI (14)
+    rsi_14: Optional[Decimal] = None
+    rsi_status: str = "neutral"  # "overbought", "oversold", "neutral"
+
+    # Moving Averages
+    sma_20: Optional[Decimal] = None
+    sma_50: Optional[Decimal] = None
+    price_vs_sma20: Optional[str] = None  # "above", "below"
+    ma_trend: Optional[str] = None  # "bullish", "bearish", "neutral"
+    ma_crossover: Optional[str] = None  # "golden_cross", "death_cross", None
+
+    # Support & Resistance (20-day)
+    support_20d: Optional[Decimal] = None
+    resistance_20d: Optional[Decimal] = None
+
+    error: Optional[str] = None
+    error_message: Optional[str] = None
+
+    @property
+    def is_failed(self) -> bool:
+        return self.error is not None or self.data_points == 0
+

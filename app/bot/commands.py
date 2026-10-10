@@ -33,9 +33,11 @@ from app.bot.formatters import (
     format_remove_not_found,
     format_remove_success,
     format_start_message,
+    format_technical_analysis,
     format_watchlist,
     format_watchlist_empty,
 )
+from app.indicators.service import TechnicalAnalysisService
 from app.market_data.service import MarketDataService
 from app.storage.alert_repository import AlertRepository
 from app.storage.models import AlertCondition, AlertStatus
@@ -96,6 +98,7 @@ class BotCommandHandlers:
         max_watchlist_assets: int = 30,
         alert_repo: Optional[AlertRepository] = None,
         max_active_alerts: int = 50,
+        ta_service: Optional[TechnicalAnalysisService] = None,
     ) -> None:
         self._market = market_service
         self._allowed_ids = allowed_ids
@@ -103,6 +106,7 @@ class BotCommandHandlers:
         self._max_watchlist_assets = max_watchlist_assets
         self._alert_repo = alert_repo
         self._max_active_alerts = max_active_alerts
+        self._ta_service = ta_service
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler untuk /start"""
@@ -580,5 +584,60 @@ class BotCommandHandlers:
             await update.message.reply_text(format_alert_deleted(alert_id), parse_mode=ParseMode.HTML)
         else:
             await update.message.reply_text(format_alert_not_found(alert_id), parse_mode=ParseMode.HTML)
+
+    async def cmd_ta(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handler untuk /ta <ticker>
+        Menghitung dan menampilkan indikator teknikal (RSI 14, SMA 20, SMA 50, S/R).
+        Contoh: /ta BBCA.JK, /ta AAPL, /ta GC=F
+        """
+        if update.message is None:
+            return
+
+        if not await _check_access(update, self._allowed_ids):
+            return
+
+        user_id = update.effective_user.id  # type: ignore[union-attr]
+
+        if self._ta_service is None:
+            await update.message.reply_text("⚠️ Layanan analisis teknikal belum aktif.", parse_mode=ParseMode.HTML)
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "❓ Penggunaan: <code>/ta &lt;ticker&gt;</code>\n\n"
+                "<b>Contoh:</b>\n"
+                "• <code>/ta BBCA.JK</code> — Analisis teknikal Bank BCA (IDX)\n"
+                "• <code>/ta AAPL</code> — Analisis teknikal Apple Inc.\n"
+                "• <code>/ta GC=F</code> — Analisis teknikal Emas COMEX",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        symbol = context.args[0].strip().upper()
+        if not symbol or len(symbol) > 20:
+            await update.message.reply_text(
+                f"❌ Simbol <b>{symbol[:20]}</b> tidak valid. Panjang harus 1-20 karakter.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        loading_msg = await update.message.reply_text(
+            f"⏳ Menghitung indikator teknikal (RSI, MA20/50, S/R) untuk <b>{symbol}</b>...",
+            parse_mode=ParseMode.HTML,
+        )
+
+        try:
+            ta_result = await self._ta_service.analyze(symbol)
+            text = format_technical_analysis(ta_result)
+        except Exception as exc:
+            logger.error("Error tidak terduga pada cmd_ta untuk %s: %s", symbol, exc)
+            text = f"⚠️ Terjadi kesalahan saat menganalisis <b>{symbol}</b>. Coba lagi beberapa saat."
+
+        try:
+            await loading_msg.edit_text(text, parse_mode=ParseMode.HTML)
+        except Exception:
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
 
 
