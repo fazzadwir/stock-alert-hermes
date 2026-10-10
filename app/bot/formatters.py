@@ -220,14 +220,19 @@ def format_help_message() -> str:
         "• /watchlist — Lihat seluruh aset di watchlist Anda\n"
         "• /market — Snapshot pergerakan harga watchlist\n"
         "• /add &lt;ticker&gt; [catatan] — Tambah aset ke watchlist\n"
-        "• /remove &lt;ticker&gt; — Hapus aset dari watchlist\n\n"
+        "• /remove &lt;ticker&gt; — Hapus aset dari watchlist\n"
+        "• /alert &lt;ticker&gt; &lt;above|below&gt; &lt;target&gt; — Buat alert target harga\n"
+        "• /alerts — Daftar alert aktif Anda\n"
+        "• /delalert &lt;id&gt; — Hapus alert berdasarkan ID\n\n"
         "<b>Contoh penggunaan:</b>\n"
-        "<code>/stock AAPL</code> — Apple Inc.\n"
-        "<code>/stock BBCA.JK</code> — Bank BCA (IDX)\n"
-        "<code>/gold</code> — Emas futures COMEX (GC=F)\n"
+        "<code>/stock AAPL</code> — Cek Apple Inc.\n"
+        "<code>/stock BBCA.JK</code> — Cek Bank BCA (IDX)\n"
+        "<code>/gold</code> — Cek emas futures COMEX (GC=F)\n"
         "<code>/add BBCA.JK Core banking</code> — Tambah ke watchlist\n"
-        "<code>/add GC=F Lindung nilai</code> — Tambah emas ke watchlist\n"
-        "<code>/remove BBCA.JK</code> — Hapus dari watchlist\n\n"
+        "<code>/alert BBCA.JK above 6200</code> — Alert jika BCA naik ke Rp 6.200\n"
+        "<code>/alert AAPL below 210</code> — Alert jika Apple turun ke $210\n"
+        "<code>/alerts</code> — Lihat semua alert aktif\n"
+        "<code>/delalert 1</code> — Hapus alert #1\n\n"
         "<b>Format ticker saham Indonesia (IDX):</b>\n"
         "Tambahkan <code>.JK</code> di akhir kode saham.\n"
         "Contoh: <code>BBCA.JK</code>, <code>BMRI.JK</code>, <code>ASII.JK</code>\n\n"
@@ -235,7 +240,7 @@ def format_help_message() -> str:
         "• Data IDX umumnya delayed 15-20 menit\n"
         "• <code>GC=F</code> adalah emas futures COMEX, bukan harga spot/Antam\n"
         "• Provider: yfinance (bukan API resmi Yahoo Finance)\n\n"
-        "<i>Fitur alert dan analisis AI sedang dalam pengembangan.</i>"
+        "<i>Fitur analisis AI sedang dalam pengembangan.</i>"
     )
 
 
@@ -375,4 +380,108 @@ def format_remove_success(symbol: str) -> str:
 def format_remove_not_found(symbol: str) -> str:
     """Format pesan ketika simbol tidak ditemukan di watchlist saat remove."""
     return f"❓ Simbol <b>{html.escape(symbol.upper())}</b> tidak ditemukan dalam watchlist Anda."
+
+
+# ─── Alert Formatters ────────────────────────────────────────────────────────
+
+
+def format_alert_created(
+    alert_id: int,
+    symbol: str,
+    condition: str,
+    target_value: Decimal,
+    quote: Optional[QuoteResult] = None,
+) -> str:
+    """Format konfirmasi pembuatan alert baru."""
+    cond_label = "naik di atas (≥)" if condition == "above" else "turun di bawah (≤)"
+    price_info = ""
+    if quote and quote.has_price:
+        price_info = f"\nHarga saat ini: <code>{_format_price(quote.price, quote.currency)}</code>"
+
+    return (
+        f"🔔 <b>Alert #{alert_id} Berhasil Dibuat!</b>\n\n"
+        f"• Simbol: <b>{html.escape(symbol.upper())}</b>\n"
+        f"• Kondisi: <b>{cond_label}</b>\n"
+        f"• Target: <code>{target_value:,.2f}</code>{price_info}\n\n"
+        f"MarketPulse akan mengirim notifikasi saat harga menyentuh target.\n"
+        f"Ketik <code>/alerts</code> untuk melihat semua alert aktif."
+    )
+
+
+def format_alerts_empty() -> str:
+    """Format pesan saat user belum memiliki alert aktif."""
+    return (
+        "🔔 <b>Belum Ada Alert Aktif</b>\n\n"
+        "Anda belum memiliki alert harga yang aktif.\n\n"
+        "<b>Cara membuat alert:</b>\n"
+        "• <code>/alert BBCA.JK above 6200</code> — Alert saat BCA ≥ 6200\n"
+        "• <code>/alert AAPL below 220</code> — Alert saat Apple ≤ 220\n"
+        "• <code>/alert GC=F above 2750</code> — Alert saat emas COMEX ≥ 2750"
+    )
+
+
+def format_alerts_list(alerts: list[Any]) -> str:
+    """Format daftar alert aktif milik user."""
+    if not alerts:
+        return format_alerts_empty()
+
+    lines = [f"🔔 <b>Daftar Alert Aktif ({len(alerts)})</b>\n"]
+
+    for a in alerts:
+        cond_icon = "📈 ≥" if a.condition == "above" else "📉 ≤"
+        target_str = f"{a.target_value:,.2f}"
+        note_str = f" <i>({html.escape(a.note)})</i>" if getattr(a, "note", None) else ""
+
+        lines.append(
+            f"• <b>#{a.id}</b> <code>{html.escape(a.symbol)}</code> {cond_icon} <b>{target_str}</b>{note_str}"
+        )
+
+    lines.append("\n<i>Gunakan /delalert &lt;id&gt; untuk membatalkan alert.</i>")
+    return "\n".join(lines)
+
+
+def format_alert_triggered(alert: Any, quote: QuoteResult) -> str:
+    """
+    Format notifikasi saat alert terpicu.
+    Dikirimkan langsung ke chat Telegram pengguna.
+    """
+    symbol = html.escape(alert.symbol)
+    cond_text = "naik menembus" if alert.condition == "above" else "turun menembus"
+    price_str = _format_price(quote.price, quote.currency)
+    note_line = f"\nCatatan: <i>{html.escape(alert.note)}</i>" if getattr(alert, "note", None) else ""
+
+    change_line = ""
+    if quote.has_change:
+        arrow = "+" if quote.price_change > 0 else ""
+        change_line = f"\nPerubahan hari ini: <code>{arrow}{quote.price_change_pct:+.2f}%</code>"
+
+    wib_time = _to_wib(quote.fetch_timestamp) or "-"
+
+    return (
+        f"🚨 <b>MARKET ALERT TERPICU!</b>\n\n"
+        f"📌 <b>{symbol}</b> telah {cond_text} target!\n"
+        f"• Target Anda: <code>{alert.target_value:,.2f}</code>\n"
+        f"• Harga Terkini: <b>{price_str}</b>{change_line}{note_line}\n"
+        f"• Waktu: <i>{wib_time}</i>\n\n"
+        f"<i>Status data: {_STATUS_LABEL.get(quote.data_status, quote.data_status.value)}</i>"
+    )
+
+
+def format_alert_deleted(alert_id: int) -> str:
+    """Format pesan sukses menghapus alert."""
+    return f"🗑️ Alert <b>#{alert_id}</b> berhasil dihapus."
+
+
+def format_alert_not_found(alert_id: int) -> str:
+    """Format pesan saat alert tidak ditemukan saat dihapus."""
+    return f"❓ Alert <b>#{alert_id}</b> tidak ditemukan atau bukan milik Anda."
+
+
+def format_alert_limit_reached(max_limit: int) -> str:
+    """Format pesan saat kuota alert aktif penuh."""
+    return (
+        f"⚠️ Anda telah mencapai batas maksimal ({max_limit} alert aktif).\n"
+        f"Hapus alert yang tidak dibutuhkan dengan <code>/delalert &lt;id&gt;</code>."
+    )
+
 

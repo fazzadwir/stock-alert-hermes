@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import FrozenSet, Optional
 
 from telegram import Update
@@ -20,6 +21,12 @@ from app.bot.formatters import (
     format_add_exists,
     format_add_limit_reached,
     format_add_success,
+    format_alert_created,
+    format_alert_deleted,
+    format_alert_limit_reached,
+    format_alert_not_found,
+    format_alerts_empty,
+    format_alerts_list,
     format_help_message,
     format_market_summary,
     format_quote,
@@ -30,6 +37,8 @@ from app.bot.formatters import (
     format_watchlist_empty,
 )
 from app.market_data.service import MarketDataService
+from app.storage.alert_repository import AlertRepository
+from app.storage.models import AlertCondition, AlertStatus
 from app.storage.watchlist_repository import WatchlistRepository
 
 logger = logging.getLogger(__name__)
@@ -85,11 +94,15 @@ class BotCommandHandlers:
         allowed_ids: FrozenSet[int],
         watchlist_repo: Optional[WatchlistRepository] = None,
         max_watchlist_assets: int = 30,
+        alert_repo: Optional[AlertRepository] = None,
+        max_active_alerts: int = 50,
     ) -> None:
         self._market = market_service
         self._allowed_ids = allowed_ids
         self._watchlist_repo = watchlist_repo
         self._max_watchlist_assets = max_watchlist_assets
+        self._alert_repo = alert_repo
+        self._max_active_alerts = max_active_alerts
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handler untuk /start"""
@@ -407,4 +420,165 @@ class BotCommandHandlers:
             await update.message.reply_text(format_remove_success(symbol), parse_mode=ParseMode.HTML)
         else:
             await update.message.reply_text(format_remove_not_found(symbol), parse_mode=ParseMode.HTML)
+
+    async def cmd_alert(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handler untuk /alert <ticker> <above|below> <target> [catatan]
+        Contoh:
+        /alert BBCA.JK above 6200
+        /alert AAPL below 220 Entry point
+        """
+        if update.message is None:
+            return
+
+        if not await _check_access(update, self._allowed_ids):
+            return
+
+        user_id = update.effective_user.id  # type: ignore[union-attr]
+
+        if self._alert_repo is None:
+            await update.message.reply_text("⚠️ Fitur alert belum aktif.", parse_mode=ParseMode.HTML)
+            return
+
+        if not context.args or len(context.args) < 3:
+            await update.message.reply_text(
+                "❓ Penggunaan: <code>/alert &lt;ticker&gt; &lt;above|below&gt; &lt;target_harga&gt; [catatan]</code>\n\n"
+                "<b>Contoh:</b>\n"
+                "• <code>/alert BBCA.JK above 6200</code> — Alert saat BCA ≥ 6200\n"
+                "• <code>/alert AAPL below 220 Target beli</code> — Alert saat Apple ≤ 220\n"
+                "• <code>/alert GC=F above 2750</code> — Alert emas COMEX ≥ 2750",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        symbol = context.args[0].strip().upper()
+        condition_raw = context.args[1].strip().lower()
+        target_str = context.args[2].strip().replace(",", "")
+        note = " ".join(context.args[3:]).strip() if len(context.args) > 3 else None
+
+        if condition_raw not in ("above", "below"):
+            await update.message.reply_text(
+                "❌ Kondisi harus <code>above</code> (naik di atas) atau <code>below</code> (turun di bawah).\n"
+                "Contoh: <code>/alert BBCA.JK above 6200</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        try:
+            target_value = Decimal(target_str)
+            if target_value <= 0:
+                raise ValueError("Target harus positif")
+        except (InvalidOperation, ValueError):
+            await update.message.reply_text(
+                f"❌ Nilai target harga '<b>{target_str}</b>' tidak valid. Masukkan angka positif.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        # Cek batas kuota alert aktif
+        active_count = await self._alert_repo.count_user_active_alerts(user_id)
+        if active_count >= self._max_active_alerts:
+            await update.message.reply_text(
+                format_alert_limit_reached(self._max_active_alerts),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        loading_msg = await update.message.reply_text(
+            f"⏳ Memvalidasi simbol <b>{symbol}</b> di pasar...",
+            parse_mode=ParseMode.HTML,
+        )
+
+        # Validasi simbol ke provider pasar
+        quote = await self._market.get_quote(symbol)
+        if quote.is_failed or not quote.has_price:
+            await loading_msg.edit_text(
+                f"❌ Simbol <b>{symbol}</b> tidak ditemukan atau data harga tidak tersedia.\n"
+                "Pastikan format kode benar (contoh: <code>BBCA.JK</code> untuk IDX).",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        # Simpan alert ke database
+        try:
+            alert = await self._alert_repo.create_alert(
+                user_id=user_id,
+                symbol=symbol,
+                condition=condition_raw,
+                target_value=target_value,
+                note=note,
+            )
+            await loading_msg.edit_text(
+                format_alert_created(alert.id, symbol, condition_raw, target_value, quote),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.error("Gagal membuat alert untuk user %d: %s", user_id, exc)
+            await loading_msg.edit_text("⚠️ Terjadi kesalahan saat menyimpan alert. Coba lagi beberapa saat.", parse_mode=ParseMode.HTML)
+
+    async def cmd_alerts(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handler untuk /alerts
+        Menampilkan daftar seluruh alert aktif milik user.
+        """
+        if update.message is None:
+            return
+
+        if not await _check_access(update, self._allowed_ids):
+            return
+
+        user_id = update.effective_user.id  # type: ignore[union-attr]
+
+        if self._alert_repo is None:
+            await update.message.reply_text("⚠️ Fitur alert belum aktif.", parse_mode=ParseMode.HTML)
+            return
+
+        alerts = await self._alert_repo.get_user_alerts(user_id, status=AlertStatus.ACTIVE.value)
+        await update.message.reply_text(
+            format_alerts_list(alerts),
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def cmd_delalert(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handler untuk /delalert <id>
+        Menghapus alert berdasarkan ID.
+        """
+        if update.message is None:
+            return
+
+        if not await _check_access(update, self._allowed_ids):
+            return
+
+        user_id = update.effective_user.id  # type: ignore[union-attr]
+
+        if self._alert_repo is None:
+            await update.message.reply_text("⚠️ Fitur alert belum aktif.", parse_mode=ParseMode.HTML)
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "❓ Penggunaan: <code>/delalert &lt;id_alert&gt;</code>\n\n"
+                "Contoh: <code>/delalert 1</code>\n"
+                "Gunakan <code>/alerts</code> untuk melihat ID alert Anda.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        id_str = context.args[0].strip()
+        try:
+            alert_id = int(id_str)
+        except ValueError:
+            await update.message.reply_text(
+                f"❌ ID alert harus berupa angka bulat. Diberikan: <code>{id_str}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        deleted = await self._alert_repo.delete_alert(user_id, alert_id)
+        if deleted:
+            await update.message.reply_text(format_alert_deleted(alert_id), parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(format_alert_not_found(alert_id), parse_mode=ParseMode.HTML)
+
 

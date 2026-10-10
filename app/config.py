@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     quote_cache_seconds: int = 60
     max_watchlist_assets: int = 30
     max_active_alerts: int = 50
+    alert_check_interval_seconds: int = 120
 
     # ─── Hermes Agent ────────────────────────────────────────────────────────
     hermes_mode: str = "disabled"       # disabled | cli | serve

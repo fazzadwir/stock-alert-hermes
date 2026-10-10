@@ -66,12 +66,18 @@ def main() -> None:
 
     # Inisialisasi Database
     import asyncio
+    from telegram.constants import ParseMode
+    from app.alerts.engine import AlertEngine
+    from app.bot.formatters import format_alert_triggered
+    from app.storage.alert_repository import AlertRepository
     from app.storage.database import DatabaseManager
+    from app.storage.models import AlertItem
     from app.storage.watchlist_repository import WatchlistRepository
 
     db_manager = DatabaseManager(database_url=settings.database_url)
     asyncio.run(db_manager.init_db())
     watchlist_repo = WatchlistRepository(session_factory=db_manager.session_factory)
+    alert_repo = AlertRepository(session_factory=db_manager.session_factory)
 
     # Setup provider dan service
     provider = YFinanceProvider(timeout_seconds=settings.request_timeout_seconds)
@@ -86,14 +92,43 @@ def main() -> None:
         allowed_ids=allowed_ids,
         watchlist_repo=watchlist_repo,
         max_watchlist_assets=settings.max_watchlist_assets,
+        alert_repo=alert_repo,
+        max_active_alerts=settings.max_active_alerts,
     )
 
     # Build Telegram application
-    app = (
-        ApplicationBuilder()
-        .token(settings.telegram_bot_token)
-        .build()
+    builder = ApplicationBuilder().token(settings.telegram_bot_token)
+
+    # Notification callback untuk AlertEngine
+    async def on_alert_triggered(alert: AlertItem, quote: Any) -> None:
+        try:
+            text = format_alert_triggered(alert, quote)
+            await app.bot.send_message(
+                chat_id=alert.user_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.error("Gagal mendispatch pesan alert ke user %d: %s", alert.user_id, exc)
+
+    # Inisialisasi AlertEngine
+    alert_engine = AlertEngine(
+        alert_repo=alert_repo,
+        market_service=market_service,
+        notify_callback=on_alert_triggered,
+        check_interval_seconds=settings.alert_check_interval_seconds,
     )
+
+    async def post_init(application: Any) -> None:
+        asyncio.create_task(alert_engine.start())
+        logger.info("Background AlertEngine task berhasil dijalankan.")
+
+    async def post_shutdown(application: Any) -> None:
+        alert_engine.stop()
+        await db_manager.close()
+        logger.info("Background AlertEngine task dan koneksi database dihentikan.")
+
+    app = builder.post_init(post_init).post_shutdown(post_shutdown).build()
 
     # Register commands
     app.add_handler(CommandHandler("start", handlers.cmd_start))
@@ -104,6 +139,9 @@ def main() -> None:
     app.add_handler(CommandHandler("market", handlers.cmd_market))
     app.add_handler(CommandHandler("add", handlers.cmd_add))
     app.add_handler(CommandHandler("remove", handlers.cmd_remove))
+    app.add_handler(CommandHandler("alert", handlers.cmd_alert))
+    app.add_handler(CommandHandler("alerts", handlers.cmd_alerts))
+    app.add_handler(CommandHandler("delalert", handlers.cmd_delalert))
 
     logger.info(
         "Bot siap. Provider: %s. Timezone: %s",
