@@ -1,0 +1,31 @@
+[Unit]
+Description=MarketPulse Telegram Bot
+Documentation=https://github.com/user/marketpulse
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/marketpulse
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+EnvironmentFile=/opt/marketpulse/.env
+ExecStart=/opt/marketpulse/venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging — output ke journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=marketpulse
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1 @@
+"""MarketPulse domain package."""
